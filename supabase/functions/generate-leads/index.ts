@@ -114,6 +114,7 @@ function normalizeLead(raw: any): Lead | null {
 
 async function callPerplexity(job: string, query: string): Promise<Lead[]> {
   if (!PERPLEXITY_API_KEY) {
+    console.error("Missing PERPLEXITY_API_KEY secret");
     throw new Error("Missing PERPLEXITY_API_KEY secret");
   }
 
@@ -130,6 +131,8 @@ async function callPerplexity(job: string, query: string): Promise<Lead[]> {
     return_related_questions: false,
   };
 
+  console.log(`Calling Perplexity API for query: "${query}"`);
+
   const res = await fetch("https://api.perplexity.ai/chat/completions", {
     method: "POST",
     headers: {
@@ -139,13 +142,20 @@ async function callPerplexity(job: string, query: string): Promise<Lead[]> {
     body: JSON.stringify(body),
   });
 
+  console.log(`Perplexity API response status: ${res.status}`);
+
   if (!res.ok) {
     const txt = await res.text();
+    console.error(`Perplexity error ${res.status}: ${txt}`);
     throw new Error(`Perplexity error ${res.status}: ${txt}`);
   }
 
   const data = await res.json();
+  console.log(`Perplexity API response:`, JSON.stringify(data, null, 2));
+  
   const content: string = data?.choices?.[0]?.message?.content ?? "";
+  console.log(`Content received: ${content.substring(0, 200)}...`);
+  
   const leads = safeParseLeads(content)
     .map(normalizeLead)
     .filter((l): l is Lead => !!l)
@@ -154,6 +164,7 @@ async function callPerplexity(job: string, query: string): Promise<Lead[]> {
       relevance_score: Math.max(0, Math.min(100, Math.round(l.relevance_score || 0))),
     }));
 
+  console.log(`Parsed ${leads.length} leads from this query`);
   return leads;
 }
 
