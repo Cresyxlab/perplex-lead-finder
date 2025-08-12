@@ -37,12 +37,12 @@ const Index = () => {
     setLoading(true);
     setLeads([]);
     try {
-      const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-leads`;
+      const url = `https://ramicmfsdywohgftyzxr.supabase.co/functions/v1/generate-leads`;
       const res = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          Authorization: `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJhbWljbWZzZHl3b2hnZnR5enhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUwMzY0MjUsImV4cCI6MjA3MDYxMjQyNX0.0TQJKEZQNk4Btvkv0TI3tTV3jo4jILfZEHeWvs-fA7M`,
         },
         body: JSON.stringify({ prompt, jobDescription, limit }),
       });
