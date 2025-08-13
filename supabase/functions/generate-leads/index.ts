@@ -25,204 +25,131 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-function buildInstruction(jobDescription: string, query: string) {
-  return `Find up to 25 hiring managers that match the following job description: "${jobDescription}".
-Search using: "${query}".
-Return ONLY a valid JSON array with these exact keys:
-name, title, company, location, profile_url, relevance_score (0-100).
-Do not include any explanation, markdown, or extra text outside the JSON.`;
-}
-
-function generateVariations(prompt: string, job: string): string[] {
-  const terms = [
-    "hiring manager",
-    "director",
-    "head of",
-    "vp",
-    "lead",
-    "manager",
-  ];
-  const actions = [
-    "hiring",
-    "recruiting",
-    "building team",
-    "open roles",
-  ];
-  const scopes = [
-    "EU",
-    "Europe",
-    "European Union",
-    "UK",
-  ];
-
-  const base = prompt.trim();
-  const variants = new Set<string>();
-
-  variants.add(base);
-  for (const t of terms) {
-    variants.add(`${base} ${t}`);
-  }
-  for (const a of actions) {
-    variants.add(`${base} ${a}`);
-  }
-  for (const s of scopes) {
-    variants.add(`${base} ${s}`);
-  }
-  // Job-based expansions
-  variants.add(`${base} — profile: ${job.slice(0, 120)}`);
-  variants.add(`Leaders matching JD: ${job.slice(0, 160)} — ${base}`);
-
-  return Array.from(variants).slice(0, 12); // cap to 12
-}
-
-function safeParseLeads(text: string): Lead[] {
-  // Strip code fences if any
-  const stripped = text
-    .replace(/```json/g, "")
-    .replace(/```/g, "")
-    .trim();
-
-  // Try direct parse
-  try {
-    const parsed = JSON.parse(stripped);
-    if (Array.isArray(parsed)) return parsed as Lead[];
-  } catch (_) {}
-
-  // Fallback: extract first JSON array
-  const match = stripped.match(/\[[\s\S]*\]/);
-  if (match) {
-    try {
-      const parsed = JSON.parse(match[0]);
-      if (Array.isArray(parsed)) return parsed as Lead[];
-    } catch (_) {}
-  }
-
-  return [];
-}
-
-function normalizeLead(raw: any): Lead | null {
-  if (!raw) return null;
-  const name = String(raw.name || "").trim();
-  const title = String(raw.title || "").trim();
-  const company = String(raw.company || "").trim();
-  const location = String(raw.location || "").trim();
-  const profile_url = String(raw.profile_url || raw.profileUrl || "").trim();
-  const relevance_score = Number(raw.relevance_score ?? raw.relevanceScore ?? 0);
-  if (!name || !company) return null;
-  return { name, title, company, location, profile_url, relevance_score };
-}
-
-async function callPerplexity(job: string, query: string): Promise<Lead[]> {
-  if (!PERPLEXITY_API_KEY) {
-    console.error("Missing PERPLEXITY_API_KEY secret");
-    throw new Error("Missing PERPLEXITY_API_KEY secret");
-  }
-
-  const models = ["llama-3.1-sonar-small-128k-online", "llama-3.1-sonar-large-128k-online"];
-  
-  console.log(`Calling Perplexity API for query: "${query}"`);
-
-  let res: Response | null = null;
-  let data: any = null;
+async function callPerplexityWithFallback(messages: any[]): Promise<any> {
+  const models = ["sonar-small-online", "sonar-large-online"];
 
   for (const model of models) {
     try {
-      const body = {
-        model,
-        messages: [
-          { role: "system", content: "Be precise and concise. Return only JSON." },
-          { role: "user", content: buildInstruction(job, query) },
-        ],
-        temperature: 0.2,
-        top_p: 0.9,
-        max_tokens: 1000,
-        return_images: false,
-        return_related_questions: false,
-      };
-
-      res = await fetch("https://api.perplexity.ai/chat/completions", {
+      const res = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${PERPLEXITY_API_KEY}`,
-          "Content-Type": "application/json",
+          "Authorization": `Bearer ${PERPLEXITY_API_KEY}`,
+          "Content-Type": "application/json"
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: 0.2,
+          top_p: 0.9,
+          max_tokens: 1000,
+          return_images: false,
+          return_related_questions: false,
+        })
       });
 
-      console.log(`Perplexity API response status: ${res.status} for model: ${model}`);
-
       if (!res.ok) {
-        const txt = await res.text();
-        console.warn(`Model ${model} failed:`, txt);
-        continue; // try next model
+        const errorData = await res.json();
+        console.warn(`Model ${model} failed:`, errorData);
+        continue;
       }
 
-      data = await res.json();
-      console.log(`✅ Successfully used model: ${model}`);
-      break; // success, exit loop
+      const data = await res.json();
+      console.log(`✅ Used model: ${model}`);
+      return data;
+
     } catch (err) {
-      console.error(`Error calling model ${model}:`, err);
-      continue; // try next model
+      console.error(`Error calling ${model}:`, err);
+      continue;
     }
   }
 
-  if (!res || !res.ok || !data) {
-    throw new Error("All Perplexity model calls failed");
-  }
-
-  console.log(`Perplexity API response:`, JSON.stringify(data, null, 2));
-  
-  const content: string = data?.choices?.[0]?.message?.content ?? "";
-  console.log(`Content received: ${content.substring(0, 200)}...`);
-  
-  const leads = safeParseLeads(content)
-    .map(normalizeLead)
-    .filter((l): l is Lead => !!l)
-    .map((l) => ({
-      ...l,
-      relevance_score: Math.max(0, Math.min(100, Math.round(l.relevance_score || 0))),
-    }));
-
-  console.log(`Parsed ${leads.length} leads from this query`);
-  return leads;
+  throw new Error("All Perplexity model calls failed.");
 }
 
-async function withConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = [];
-  let index = 0;
+function extractJsonArray(text: string): Lead[] {
+  try {
+    const start = text.indexOf("[");
+    const end = text.lastIndexOf("]") + 1;
+    if (start === -1 || end === -1) return [];
+    return JSON.parse(text.slice(start, end));
+  } catch (err) {
+    console.error("JSON parse failed:", err);
+    return [];
+  }
+}
 
-  async function run() {
-    while (index < items.length) {
-      const i = index++;
-      try {
-        const r = await worker(items[i]);
-        // @ts-ignore collect arrays by spreading if present
-        if (Array.isArray(r)) results.push(...(r as any));
-        else results.push(r as any);
-      } catch (_e) {
-        // swallow individual call errors to continue coverage
+function normalizeLeads(leads: any[]): Lead[] {
+  return leads.map(lead => ({
+    name: lead.name || "",
+    title: lead.title || "",
+    company: lead.company || "",
+    location: lead.location || "",
+    profile_url: lead.profile_url || "",
+    relevance_score: Math.max(0, Math.min(100, Math.round(lead.relevance_score || lead.score || 0)))
+  })).filter(lead => lead.name && lead.company);
+}
+
+function dedupeLeads(leads: Lead[]): Lead[] {
+  const seen = new Map();
+  for (const lead of leads) {
+    const key = `${lead.name}-${lead.company}`.toLowerCase();
+    if (!seen.has(key) || lead.relevance_score > seen.get(key).relevance_score) {
+      seen.set(key, lead);
+    }
+  }
+  return Array.from(seen.values());
+}
+
+async function generateLeads(prompt: string, jobDescription: string, limit: number = 200): Promise<Lead[]> {
+  if (!PERPLEXITY_API_KEY) {
+    throw new Error("Missing PERPLEXITY_API_KEY secret");
+  }
+
+  const queries = [
+    `Find hiring managers relevant to: ${jobDescription}`,
+    `List decision makers hiring for: ${prompt}`,
+    `Hiring managers in companies needing: ${jobDescription}`,
+    `${prompt} recruitment leads`,
+    `Key people hiring for: ${jobDescription}`,
+    `Directors or managers in charge of hiring for: ${jobDescription}`,
+    `Leads for companies actively recruiting for: ${jobDescription}`,
+  ];
+
+  let allLeads: Lead[] = [];
+
+  for (const query of queries) {
+    const messages = [
+      {
+        role: "user",
+        content: `Find up to 25 hiring managers that match this job description: "${jobDescription}". 
+        Search using: "${query}". 
+        Return ONLY a valid JSON array with these exact keys: name, title, company, location, profile_url, relevance_score (0-100).`
       }
+    ];
+
+    try {
+      console.log(`Processing query: "${query}"`);
+      const perplexityData = await callPerplexityWithFallback(messages);
+      const rawText = perplexityData.choices?.[0]?.message?.content || "";
+      console.log(`Raw response for query "${query}": ${rawText.substring(0, 200)}...`);
+      
+      let leads = extractJsonArray(rawText);
+      leads = normalizeLeads(leads);
+      allLeads = allLeads.concat(leads);
+      console.log(`Found ${leads.length} leads for query: "${query}"`);
+    } catch (err) {
+      console.error(`Error fetching for query "${query}":`, err);
+      continue;
     }
   }
 
-  const runners = Array.from({ length: Math.min(limit, items.length) }, run);
-  await Promise.all(runners);
-  return results;
+  // Deduplicate + sort
+  let finalLeads = dedupeLeads(allLeads);
+  finalLeads = finalLeads.sort((a, b) => b.relevance_score - a.relevance_score);
+  console.log(`Final leads count: ${finalLeads.length}`);
+  return finalLeads.slice(0, limit);
 }
 
-function dedupeAndSort(leads: Lead[], limit: number): Lead[] {
-  const map = new Map<string, Lead>();
-  for (const l of leads) {
-    const key = `${l.name.toLowerCase()}|${l.company.toLowerCase()}`;
-    const existing = map.get(key);
-    if (!existing || (l.relevance_score ?? 0) > (existing.relevance_score ?? 0)) {
-      map.set(key, l);
-    }
-  }
-  return Array.from(map.values())
-    .sort((a, b) => (b.relevance_score ?? 0) - (a.relevance_score ?? 0))
-    .slice(0, limit);
-}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -248,14 +175,7 @@ serve(async (req) => {
 
     const target = Math.max(10, Math.min(Number(limit || 200), 500));
 
-    const variations = generateVariations(prompt, jobDescription);
-
-    const concurrentCalls = 4; // Respect rate limits: 3–5 concurrent
-    const allLeads = (await withConcurrency(variations, concurrentCalls, (q) =>
-      callPerplexity(jobDescription, q)
-    )) as Lead[];
-
-    const finalLeads = dedupeAndSort(allLeads, target);
+    const finalLeads = await generateLeads(prompt, jobDescription, target);
 
     return new Response(JSON.stringify({ leads: finalLeads }), {
       headers: { "Content-Type": "application/json", ...CORS_HEADERS },
