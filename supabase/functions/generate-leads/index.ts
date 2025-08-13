@@ -118,39 +118,58 @@ async function callPerplexity(job: string, query: string): Promise<Lead[]> {
     throw new Error("Missing PERPLEXITY_API_KEY secret");
   }
 
-  const body = {
-    model: "sonar-medium-online",
-    messages: [
-      { role: "system", content: "Be precise and concise. Return only JSON." },
-      { role: "user", content: buildInstruction(job, query) },
-    ],
-    temperature: 0.2,
-    top_p: 0.9,
-    max_tokens: 1000,
-    return_images: false,
-    return_related_questions: false,
-  };
-
+  const models = ["llama-3.1-sonar-small-128k-online", "llama-3.1-sonar-large-128k-online"];
+  
   console.log(`Calling Perplexity API for query: "${query}"`);
 
-  const res = await fetch("https://api.perplexity.ai/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${PERPLEXITY_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  let res: Response | null = null;
+  let data: any = null;
 
-  console.log(`Perplexity API response status: ${res.status}`);
+  for (const model of models) {
+    try {
+      const body = {
+        model,
+        messages: [
+          { role: "system", content: "Be precise and concise. Return only JSON." },
+          { role: "user", content: buildInstruction(job, query) },
+        ],
+        temperature: 0.2,
+        top_p: 0.9,
+        max_tokens: 1000,
+        return_images: false,
+        return_related_questions: false,
+      };
 
-  if (!res.ok) {
-    const txt = await res.text();
-    console.error(`Perplexity error ${res.status}: ${txt}`);
-    throw new Error(`Perplexity error ${res.status}: ${txt}`);
+      res = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${PERPLEXITY_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+      console.log(`Perplexity API response status: ${res.status} for model: ${model}`);
+
+      if (!res.ok) {
+        const txt = await res.text();
+        console.warn(`Model ${model} failed:`, txt);
+        continue; // try next model
+      }
+
+      data = await res.json();
+      console.log(`✅ Successfully used model: ${model}`);
+      break; // success, exit loop
+    } catch (err) {
+      console.error(`Error calling model ${model}:`, err);
+      continue; // try next model
+    }
   }
 
-  const data = await res.json();
+  if (!res || !res.ok || !data) {
+    throw new Error("All Perplexity model calls failed");
+  }
+
   console.log(`Perplexity API response:`, JSON.stringify(data, null, 2));
   
   const content: string = data?.choices?.[0]?.message?.content ?? "";
