@@ -66,27 +66,50 @@ async function callPerplexityWithFallback(messages: any[]): Promise<any> {
   throw new Error("All Perplexity model calls failed.");
 }
 
-function extractJsonArray(text: string): Lead[] {
+function safeExtractJson(text: string): any[] {
   try {
-    const start = text.indexOf("[");
-    const end = text.lastIndexOf("]") + 1;
-    if (start === -1 || end === -1) return [];
-    return JSON.parse(text.slice(start, end));
+    // Remove markdown code blocks
+    let cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    
+    // Try to find JSON array
+    const start = cleanText.indexOf("[");
+    const end = cleanText.lastIndexOf("]") + 1;
+    
+    if (start === -1 || end === -1) {
+      console.log("🔍 DEBUG: No JSON array brackets found in text");
+      return [];
+    }
+    
+    const jsonStr = cleanText.slice(start, end);
+    const parsed = JSON.parse(jsonStr);
+    console.log(`🔍 DEBUG: Successfully parsed ${parsed.length} items from JSON`);
+    return Array.isArray(parsed) ? parsed : [];
   } catch (err) {
-    console.error("JSON parse failed:", err);
+    console.error("🔍 DEBUG: JSON parse failed:", err);
+    console.log("🔍 DEBUG: Failed text was:", text.substring(0, 500));
     return [];
   }
 }
 
-function normalizeLeads(leads: any[]): Lead[] {
-  return leads.map(lead => ({
+function normalizeLead(lead: any): Lead | null {
+  if (!lead.name || !lead.company) {
+    return null;
+  }
+  
+  return {
     name: lead.name || "",
-    title: lead.title || "",
-    company: lead.company || "",
-    location: lead.location || "",
-    profile_url: lead.profile_url || "",
-    relevance_score: Math.max(0, Math.min(100, Math.round(lead.relevance_score || lead.score || 0)))
-  })).filter(lead => lead.name && lead.company);
+    title: lead.title || lead.position || "",
+    company: lead.company || lead.organization || "",
+    location: lead.location || lead.city || "",
+    profile_url: lead.profile_url || lead.linkedin_url || lead.url || "",
+    relevance_score: Math.max(0, Math.min(100, Math.round(
+      lead.relevance_score || lead.score || lead.rating || 0
+    )))
+  };
+}
+
+function normalizeLeads(leads: any[]): Lead[] {
+  return leads.map(normalizeLead).filter((lead): lead is Lead => lead !== null);
 }
 
 function dedupeLeads(leads: Lead[]): Lead[] {
@@ -133,10 +156,16 @@ async function generateLeads(prompt: string, jobDescription: string, limit: numb
       const rawText = perplexityData.choices?.[0]?.message?.content || "";
       console.log(`Raw response for query "${query}": ${rawText.substring(0, 200)}...`);
       
-      let leads = extractJsonArray(rawText);
-      leads = normalizeLeads(leads);
-      allLeads = allLeads.concat(leads);
-      console.log(`Found ${leads.length} leads for query: "${query}"`);
+      let leads = safeExtractJson(rawText);
+      
+      if (leads.length === 0) {
+        console.log(`🔍 DEBUG: Zero leads extracted from query "${query}"`);
+        console.log(`🔍 DEBUG: Full raw response:`, rawText);
+      }
+      
+      const normalizedLeads = normalizeLeads(leads);
+      allLeads = allLeads.concat(normalizedLeads);
+      console.log(`Found ${normalizedLeads.length} leads for query: "${query}"`);
     } catch (err) {
       console.error(`Error fetching for query "${query}":`, err);
       continue;
