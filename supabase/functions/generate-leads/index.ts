@@ -128,55 +128,88 @@ async function generateLeads(prompt: string, jobDescription: string, limit: numb
     throw new Error("Missing PERPLEXITY_API_KEY secret");
   }
 
-  const queries = [
-    `Find hiring managers relevant to: ${jobDescription}`,
-    `List decision makers hiring for: ${prompt}`,
-    `Hiring managers in companies needing: ${jobDescription}`,
-    `${prompt} recruitment leads`,
-    `Key people hiring for: ${jobDescription}`,
-    `Directors or managers in charge of hiring for: ${jobDescription}`,
-    `Leads for companies actively recruiting for: ${jobDescription}`,
+  // PHASE 1 - SEARCH: Generate 7 variations to discover leads
+  const searchQueries = [
+    `List 25 hiring managers relevant to: ${jobDescription}`,
+    `Decision makers hiring for: ${jobDescription}`,
+    `Leads in companies hiring for: ${jobDescription}`,
+    `${jobDescription} recruitment leads`,
+    `Who is hiring for: ${jobDescription}`,
+    `Hiring managers at companies needing: ${jobDescription}`,
+    `${jobDescription} contacts in United States`,
   ];
 
-  let allLeads: Lead[] = [];
+  let combinedRawText = "";
 
-  for (const query of queries) {
+  console.log("🔍 PHASE 1 - SEARCH: Discovering leads with 7 variations...");
+  
+  for (const query of searchQueries) {
     const messages = [
       {
         role: "user",
-        content: `Find up to 25 hiring managers that match this job description: "${jobDescription}". 
-        Search using: "${query}". 
-        Return ONLY a valid JSON array with these exact keys: name, title, company, location, profile_url, relevance_score (0-100).`
+        content: query
       }
     ];
 
     try {
-      console.log(`Processing query: "${query}"`);
+      console.log(`Processing search query: "${query}"`);
       const perplexityData = await callPerplexityWithFallback(messages);
       const rawText = perplexityData.choices?.[0]?.message?.content || "";
-      console.log(`Raw response for query "${query}": ${rawText.substring(0, 200)}...`);
+      console.log(`🔍 PHASE 1 raw response for "${query}": ${rawText.substring(0, 200)}...`);
       
-      let leads = safeExtractJson(rawText);
-      
-      if (leads.length === 0) {
-        console.log(`🔍 DEBUG: Zero leads extracted from query "${query}"`);
-        console.log(`🔍 DEBUG: Full raw response:`, rawText);
-      }
-      
-      const normalizedLeads = normalizeLeads(leads);
-      allLeads = allLeads.concat(normalizedLeads);
-      console.log(`Found ${normalizedLeads.length} leads for query: "${query}"`);
+      combinedRawText += `\n\n--- Results for: ${query} ---\n${rawText}`;
     } catch (err) {
-      console.error(`Error fetching for query "${query}":`, err);
+      console.error(`Error in PHASE 1 for query "${query}":`, err);
       continue;
     }
   }
 
-  // Deduplicate + sort
-  let finalLeads = dedupeLeads(allLeads);
-  finalLeads = finalLeads.sort((a, b) => b.relevance_score - a.relevance_score);
-  console.log(`Final leads count: ${finalLeads.length}`);
-  return finalLeads.slice(0, limit);
+  if (!combinedRawText.trim()) {
+    console.log("🔍 PHASE 1 produced no results");
+    return [];
+  }
+
+  // PHASE 2 - STRUCTURE: Convert combined raw text to structured JSON
+  console.log("🔍 PHASE 2 - STRUCTURE: Converting raw text to JSON...");
+  console.log(`🔍 PHASE 2 input length: ${combinedRawText.length} characters`);
+  
+  const structureMessages = [
+    {
+      role: "system",
+      content: "From the following text, extract a valid JSON array of hiring manager leads with keys: name, title, company, location, profile_url, relevance_score (0-100). Do not include anything except the JSON array."
+    },
+    {
+      role: "user",
+      content: combinedRawText
+    }
+  ];
+
+  try {
+    const structureData = await callPerplexityWithFallback(structureMessages);
+    const structuredText = structureData.choices?.[0]?.message?.content || "";
+    console.log(`🔍 PHASE 2 raw output: ${structuredText.substring(0, 500)}...`);
+    
+    let leads = safeExtractJson(structuredText);
+    
+    if (leads.length === 0) {
+      console.log(`🔍 DEBUG: Zero leads extracted from PHASE 2`);
+      console.log(`🔍 DEBUG: Full PHASE 2 response:`, structuredText);
+      return [];
+    }
+    
+    const normalizedLeads = normalizeLeads(leads);
+    console.log(`🔍 PHASE 2 extracted ${normalizedLeads.length} leads before deduplication`);
+    
+    // Deduplicate + sort
+    let finalLeads = dedupeLeads(normalizedLeads);
+    finalLeads = finalLeads.sort((a, b) => b.relevance_score - a.relevance_score);
+    console.log(`Final leads count: ${finalLeads.length}`);
+    return finalLeads.slice(0, limit);
+    
+  } catch (err) {
+    console.error("Error in PHASE 2 structuring:", err);
+    return [];
+  }
 }
 
 
