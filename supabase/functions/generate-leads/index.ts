@@ -11,6 +11,15 @@ interface Lead {
   relevance_score: number;
 }
 
+interface Company {
+  company_name: string;
+  industry: string;
+  headquarters_location: string;
+  careers_page_url: string;
+  linkedin_company_url: string;
+  example_role_titles: string[];
+}
+
 interface GenerateRequestBody {
   prompt: string;
   jobDescription: string;
@@ -91,36 +100,48 @@ function safeExtractJson(text: string): any[] {
   }
 }
 
-function normalizeLead(lead: any): Lead | null {
-  if (!lead.name || !lead.company) {
+function normalizeCompany(company: any): Company | null {
+  if (!company.company_name || !company.example_role_titles || 
+      (Array.isArray(company.example_role_titles) && company.example_role_titles.length === 0)) {
     return null;
   }
   
   return {
-    name: lead.name || "",
-    title: lead.title || lead.position || "",
-    company: lead.company || lead.organization || "",
-    location: lead.location || lead.city || "",
-    profile_url: lead.profile_url || lead.linkedin_url || lead.url || "",
-    relevance_score: Math.max(0, Math.min(100, Math.round(
-      lead.relevance_score || lead.score || lead.rating || 0
-    )))
+    company_name: company.company_name || company.name || "",
+    industry: company.industry || "",
+    headquarters_location: company.headquarters_location || company.location || "",
+    careers_page_url: company.careers_page_url || company.careers_url || "",
+    linkedin_company_url: company.linkedin_company_url || company.linkedin_url || "",
+    example_role_titles: Array.isArray(company.example_role_titles) 
+      ? company.example_role_titles 
+      : [company.example_role_titles].filter(Boolean)
   };
 }
 
-function normalizeLeads(leads: any[]): Lead[] {
-  return leads.map(normalizeLead).filter((lead): lead is Lead => lead !== null);
+function normalizeCompanies(companies: any[]): Company[] {
+  return companies.map(normalizeCompany).filter((company): company is Company => company !== null);
 }
 
-function dedupeLeads(leads: Lead[]): Lead[] {
+function dedupeCompanies(companies: Company[]): Company[] {
   const seen = new Map();
-  for (const lead of leads) {
-    const key = `${lead.name}-${lead.company}`.toLowerCase();
-    if (!seen.has(key) || lead.relevance_score > seen.get(key).relevance_score) {
-      seen.set(key, lead);
+  for (const company of companies) {
+    const key = company.company_name.toLowerCase();
+    if (!seen.has(key)) {
+      seen.set(key, company);
     }
   }
   return Array.from(seen.values());
+}
+
+function companiesToLeads(companies: Company[]): Lead[] {
+  return companies.map((company, index) => ({
+    name: company.company_name,
+    title: company.example_role_titles[0] || "Multiple Roles",
+    company: company.company_name,
+    location: company.headquarters_location,
+    profile_url: company.linkedin_company_url || company.careers_page_url,
+    relevance_score: 100 - index // Simple relevance based on position
+  }));
 }
 
 async function generateLeads(prompt: string, jobDescription: string, limit: number = 200): Promise<Lead[]> {
@@ -128,88 +149,71 @@ async function generateLeads(prompt: string, jobDescription: string, limit: numb
     throw new Error("Missing PERPLEXITY_API_KEY secret");
   }
 
-  // PHASE 1 - SEARCH: Generate 7 variations to discover leads
-  const searchQueries = [
-    `List 25 hiring managers relevant to: ${jobDescription}`,
-    `Decision makers hiring for: ${jobDescription}`,
-    `Leads in companies hiring for: ${jobDescription}`,
-    `${jobDescription} recruitment leads`,
-    `Who is hiring for: ${jobDescription}`,
-    `Hiring managers at companies needing: ${jobDescription}`,
-    `${jobDescription} contacts in United States`,
+  // PHASE 1 - COMPANY DISCOVERY: Generate 5 variations to discover companies
+  const companyQueries = [
+    `List 50 companies actively hiring for: ${jobDescription}`,
+    `Companies in United States recruiting for: ${jobDescription}`,
+    `Firms that have posted jobs for: ${jobDescription} in the last 6 months`,
+    `${jobDescription} hiring companies with over 50 employees`,
+    `Top employers hiring for ${jobDescription} roles right now`,
   ];
 
-  let combinedRawText = "";
+  let allCompanies: Company[] = [];
 
-  console.log("🔍 PHASE 1 - SEARCH: Discovering leads with 7 variations...");
+  console.log("🏢 PHASE 1 - COMPANY DISCOVERY: Finding companies with 5 variations...");
   
-  for (const query of searchQueries) {
+  for (const query of companyQueries) {
     const messages = [
       {
         role: "user",
-        content: query
+        content: `${query}. Return ONLY a valid JSON array with these exact keys: company_name, industry, headquarters_location, careers_page_url, linkedin_company_url, example_role_titles (array of job titles).`
       }
     ];
 
     try {
-      console.log(`Processing search query: "${query}"`);
+      console.log(`Processing company query: "${query}"`);
       const perplexityData = await callPerplexityWithFallback(messages);
       const rawText = perplexityData.choices?.[0]?.message?.content || "";
-      console.log(`🔍 PHASE 1 raw response for "${query}": ${rawText.substring(0, 200)}...`);
+      console.log(`🏢 PHASE 1 raw response for "${query}": ${rawText.substring(0, 200)}...`);
       
-      combinedRawText += `\n\n--- Results for: ${query} ---\n${rawText}`;
+      let companies = safeExtractJson(rawText);
+      
+      if (companies.length === 0) {
+        console.log(`🔍 DEBUG: Zero companies extracted from query "${query}"`);
+        console.log(`🔍 DEBUG: Full raw response:`, rawText);
+      }
+      
+      const normalizedCompanies = normalizeCompanies(companies);
+      allCompanies = allCompanies.concat(normalizedCompanies);
+      console.log(`Found ${normalizedCompanies.length} companies for query: "${query}"`);
+      
     } catch (err) {
       console.error(`Error in PHASE 1 for query "${query}":`, err);
       continue;
     }
   }
 
-  if (!combinedRawText.trim()) {
-    console.log("🔍 PHASE 1 produced no results");
+  if (allCompanies.length === 0) {
+    console.log("🏢 PHASE 1 produced no valid companies");
     return [];
   }
 
-  // PHASE 2 - STRUCTURE: Convert combined raw text to structured JSON
-  console.log("🔍 PHASE 2 - STRUCTURE: Converting raw text to JSON...");
-  console.log(`🔍 PHASE 2 input length: ${combinedRawText.length} characters`);
+  // PHASE 2 - MERGE & CLEAN: Deduplicate and validate companies
+  console.log("🧹 PHASE 2 - MERGE & CLEAN: Processing companies...");
+  console.log(`🧹 Total companies before deduplication: ${allCompanies.length}`);
   
-  const structureMessages = [
-    {
-      role: "system",
-      content: "From the following text, extract a valid JSON array of hiring manager leads with keys: name, title, company, location, profile_url, relevance_score (0-100). Do not include anything except the JSON array."
-    },
-    {
-      role: "user",
-      content: combinedRawText
-    }
-  ];
+  let uniqueCompanies = dedupeCompanies(allCompanies);
+  console.log(`🧹 Unique companies after deduplication: ${uniqueCompanies.length}`);
 
-  try {
-    const structureData = await callPerplexityWithFallback(structureMessages);
-    const structuredText = structureData.choices?.[0]?.message?.content || "";
-    console.log(`🔍 PHASE 2 raw output: ${structuredText.substring(0, 500)}...`);
-    
-    let leads = safeExtractJson(structuredText);
-    
-    if (leads.length === 0) {
-      console.log(`🔍 DEBUG: Zero leads extracted from PHASE 2`);
-      console.log(`🔍 DEBUG: Full PHASE 2 response:`, structuredText);
-      return [];
-    }
-    
-    const normalizedLeads = normalizeLeads(leads);
-    console.log(`🔍 PHASE 2 extracted ${normalizedLeads.length} leads before deduplication`);
-    
-    // Deduplicate + sort
-    let finalLeads = dedupeLeads(normalizedLeads);
-    finalLeads = finalLeads.sort((a, b) => b.relevance_score - a.relevance_score);
-    console.log(`Final leads count: ${finalLeads.length}`);
-    return finalLeads.slice(0, limit);
-    
-  } catch (err) {
-    console.error("Error in PHASE 2 structuring:", err);
-    return [];
-  }
+  // PHASE 3 - OUTPUT: Sort and convert to leads format
+  console.log("📤 PHASE 3 - OUTPUT: Converting to leads format...");
+  
+  uniqueCompanies = uniqueCompanies.sort((a, b) => a.company_name.localeCompare(b.company_name));
+  uniqueCompanies = uniqueCompanies.slice(0, limit);
+  
+  const finalLeads = companiesToLeads(uniqueCompanies);
+  console.log(`Final leads count: ${finalLeads.length}`);
+  return finalLeads;
 }
 
 
