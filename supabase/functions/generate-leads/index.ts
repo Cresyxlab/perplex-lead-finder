@@ -1,4 +1,4 @@
-// Supabase Edge Function: generate-leads - 2-Phase Pipeline
+// Supabase Edge Function: generate-leads - SerpAPI Google Search
 // Deno runtime
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
@@ -12,12 +12,10 @@ interface Lead {
   relevance_score: number;
 }
 
-interface Company {
-  company_name: string;
-  industry: string;
-  headquarters_location: string;
-  careers_page_url: string;
-  linkedin_company_url: string;
+interface SerpApiResult {
+  title: string;
+  link: string;
+  snippet: string;
 }
 
 interface GenerateRequestBody {
@@ -29,8 +27,7 @@ interface GenerateRequestBody {
   companySize?: string;
 }
 
-const PERPLEXITY_API_KEY = Deno.env.get("PERPLEXITY_API_KEY");
-const LEAD_API_KEY = Deno.env.get("LEAD_API_KEY");
+const SERPAPI_KEY = Deno.env.get("SERPAPI_KEY");
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -38,168 +35,145 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-async function callPerplexityWithFallback(messages: any[]): Promise<any> {
-  const models = ["sonar-small-online", "sonar-large-online"];
-
-  for (const model of models) {
-    try {
-      const res = await fetch("https://api.perplexity.ai/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${PERPLEXITY_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: 0.2,
-          top_p: 0.9,
-          max_tokens: 1500,
-          return_images: false,
-          return_related_questions: false,
-        })
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        console.warn(`Model ${model} failed:`, errorData);
-        continue;
-      }
-
-      const data = await res.json();
-      console.log(`✅ Used model: ${model}`);
-      return data;
-
-    } catch (err) {
-      console.error(`Error calling ${model}:`, err);
-      continue;
+function extractJobTitle(jobDescription: string): string {
+  // Extract the job title from the description
+  const lines = jobDescription.split('\n');
+  const titleLine = lines.find(line => 
+    line.toLowerCase().includes('title:') || 
+    line.toLowerCase().includes('position:') || 
+    line.toLowerCase().includes('role:')
+  );
+  
+  if (titleLine) {
+    return titleLine.split(':')[1]?.trim() || '';
+  }
+  
+  // If no explicit title line, try to extract from first line or description
+  const firstLine = lines[0]?.trim();
+  if (firstLine && firstLine.length < 100) {
+    return firstLine;
+  }
+  
+  // Fallback: look for common job titles in the description
+  const commonTitles = [
+    'Senior Machine Learning Engineer', 'Machine Learning Engineer', 'Data Scientist', 
+    'Software Engineer', 'Full Stack Developer', 'Backend Engineer', 'Frontend Engineer',
+    'DevOps Engineer', 'Product Manager', 'Engineering Manager', 'Technical Lead'
+  ];
+  
+  for (const title of commonTitles) {
+    if (jobDescription.toLowerCase().includes(title.toLowerCase())) {
+      return title;
     }
   }
-
-  throw new Error("All Perplexity model calls failed.");
+  
+  return 'Software Engineer'; // Default fallback
 }
 
-function safeExtractJson(text: string): any[] {
+function getJobTitleSynonyms(jobTitle: string): string[] {
+  const synonymMap: { [key: string]: string[] } = {
+    'machine learning engineer': ['ML Engineer', 'AI Engineer', 'Data Engineer', 'AI/ML Engineer'],
+    'software engineer': ['Software Developer', 'Developer', 'Programmer', 'Software Dev'],
+    'data scientist': ['Data Analyst', 'Analytics Engineer', 'Data Engineer'],
+    'product manager': ['PM', 'Product Owner', 'Product Lead'],
+    'full stack developer': ['Fullstack Developer', 'Full-Stack Engineer', 'Web Developer'],
+    'devops engineer': ['DevOps', 'Site Reliability Engineer', 'SRE', 'Platform Engineer']
+  };
+  
+  const lowerTitle = jobTitle.toLowerCase();
+  for (const [key, synonyms] of Object.entries(synonymMap)) {
+    if (lowerTitle.includes(key)) {
+      return [jobTitle, ...synonyms];
+    }
+  }
+  
+  return [jobTitle];
+}
+
+async function callSerpAPI(query: string): Promise<SerpApiResult[]> {
+  if (!SERPAPI_KEY) {
+    throw new Error("Missing SERPAPI_KEY secret");
+  }
+
+  const url = new URL("https://serpapi.com/search.json");
+  url.searchParams.set("q", query);
+  url.searchParams.set("api_key", SERPAPI_KEY);
+  url.searchParams.set("num", "100");
+  url.searchParams.set("engine", "google");
+
+  console.log(`🔍 SerpAPI query: "${query}"`);
+
   try {
-    // Remove markdown code blocks
-    let cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    const response = await fetch(url.toString());
     
-    // Try to find JSON array
-    const start = cleanText.indexOf("[");
-    const end = cleanText.lastIndexOf("]") + 1;
-    
-    if (start === -1 || end === -1) {
-      console.log("🔍 DEBUG: No JSON array brackets found in text");
-      return [];
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`SerpAPI error: ${response.status} - ${errorText}`);
+      throw new Error(`SerpAPI request failed: ${response.status}`);
     }
-    
-    const jsonStr = cleanText.slice(start, end);
-    const parsed = JSON.parse(jsonStr);
-    console.log(`🔍 DEBUG: Successfully parsed ${parsed.length} items from JSON`);
-    return Array.isArray(parsed) ? parsed : [];
+
+    const data = await response.json();
+    console.log(`🔍 SerpAPI response status: ${response.status}`);
+    console.log(`🔍 SerpAPI raw response: ${JSON.stringify(data).substring(0, 500)}...`);
+
+    return data.organic_results || [];
   } catch (err) {
-    console.error("🔍 DEBUG: JSON parse failed:", err);
-    console.log("🔍 DEBUG: Failed text was:", text.substring(0, 500));
-    return [];
+    console.error(`Error calling SerpAPI:`, err);
+    throw err;
   }
 }
 
-async function searchGoogleForLeads(company: string): Promise<Lead[]> {
-  // SerpAPI fallback implementation for finding leads
-  const targetRoles = ["Hiring Manager", "Head of Recruitment", "CTO", "Director of AI", "Head of Data Science", "VP of Engineering"];
-  const leads: Lead[] = [];
-  
-  for (const role of targetRoles) {
-    const query = `site:linkedin.com/in "${role}" "${company}"`;
-    // Note: This would require SerpAPI integration
-    // For now, we'll return mock data to maintain functionality
-    console.log(`🔍 Would search: ${query}`);
-  }
-  
-  return leads;
-}
-
-async function enrichCompaniesWithLeads(companies: Company[]): Promise<Lead[]> {
-  console.log(`🔍 PHASE 2 - ENRICHMENT: Processing ${companies.length} companies...`);
-  
-  const allLeads: Lead[] = [];
-  const targetRoles = ["Hiring Manager", "Head of Recruitment", "CTO", "Director of AI", "Head of Data Science", "VP of Engineering"];
-  
-  for (const company of companies) {
-    try {
-      // Convert company info to lead format for display
-      const companyLead: Lead = {
-        name: company.company_name,
-        title: "Company Profile",
-        company_name: company.company_name,
-        linkedin_url: company.linkedin_company_url || company.careers_page_url || "",
-        location: company.headquarters_location,
-        relevance_score: 95
-      };
-      
-      allLeads.push(companyLead);
-      
-      // Generate mock hiring manager leads for each company
-      for (let i = 0; i < Math.min(2, targetRoles.length); i++) {
-        const role = targetRoles[i];
-        const mockLead: Lead = {
-          name: `${role} at ${company.company_name}`,
-          title: role,
-          company_name: company.company_name,
-          linkedin_url: `https://linkedin.com/company/${company.company_name.toLowerCase().replace(/\s+/g, '-')}`,
-          location: company.headquarters_location,
-          relevance_score: 90 - (i * 5)
-        };
-        allLeads.push(mockLead);
-      }
-      
-    } catch (err) {
-      console.error(`Error enriching company ${company.company_name}:`, err);
-    }
-  }
-  
-  console.log(`🔍 PHASE 2 generated ${allLeads.length} total leads`);
-  return allLeads;
-}
-
-function normalizeCompany(company: any): Company | null {
-  if (!company.company_name) {
+function mapSerpResultToLead(result: SerpApiResult): Lead | null {
+  if (!result.link || !result.link.includes('linkedin.com/in/')) {
     return null;
   }
+
+  // Extract name from title (remove " - LinkedIn" or similar suffixes)
+  let name = result.title.replace(/ - LinkedIn.*$/i, '').replace(/ \| LinkedIn.*$/i, '').trim();
   
+  // Extract potential title and company from snippet or title
+  let title = "Professional";
+  let company = "Company";
+  let location = "";
+
+  // Try to extract from snippet
+  const snippet = result.snippet || "";
+  const titleMatches = snippet.match(/(?:at|@)\s+([^,.\n]+)/i);
+  if (titleMatches) {
+    company = titleMatches[1].trim();
+  }
+
+  const positionMatches = snippet.match(/^([^,.\n]+?)(?:\s+at\s+|\s+@\s+|,)/i);
+  if (positionMatches && !positionMatches[1].includes(name)) {
+    title = positionMatches[1].trim();
+  }
+
+  // Extract location if present
+  const locationMatches = snippet.match(/(?:in|from)\s+([^,.\n]+?)(?:\s*[,.]|$)/i);
+  if (locationMatches) {
+    location = locationMatches[1].trim();
+  }
+
   return {
-    company_name: company.company_name || company.name || "",
-    industry: company.industry || "",
-    headquarters_location: company.headquarters_location || company.location || "",
-    careers_page_url: company.careers_page_url || company.careers_url || "",
-    linkedin_company_url: company.linkedin_company_url || company.linkedin_url || ""
+    name,
+    title,
+    company_name: company,
+    linkedin_url: result.link,
+    location,
+    relevance_score: 85 // Default relevance score
   };
 }
 
-function normalizeCompanies(companies: any[]): Company[] {
-  return companies.map(normalizeCompany).filter((company): company is Company => company !== null);
-}
-
-function dedupeCompanies(companies: Company[]): Company[] {
-  const seen = new Map();
-  for (const company of companies) {
-    const key = company.company_name.toLowerCase();
-    if (!seen.has(key)) {
-      seen.set(key, company);
-    }
-  }
-  return Array.from(seen.values());
-}
-
-function dedupeLeads(leads: Lead[]): Lead[] {
-  const seen = new Map();
+function deduplicateLeadsByUrl(leads: Lead[]): Lead[] {
+  const seen = new Map<string, Lead>();
+  
   for (const lead of leads) {
-    const key = `${lead.name.toLowerCase()}-${lead.company_name.toLowerCase()}`;
-    const existing = seen.get(key);
+    const existing = seen.get(lead.linkedin_url);
     if (!existing || lead.relevance_score > existing.relevance_score) {
-      seen.set(key, lead);
+      seen.set(lead.linkedin_url, lead);
     }
   }
+  
   return Array.from(seen.values());
 }
 
@@ -211,73 +185,62 @@ async function generateLeads(
   industry?: string,
   companySize?: string
 ): Promise<Lead[]> {
-  if (!PERPLEXITY_API_KEY) {
-    throw new Error("Missing PERPLEXITY_API_KEY secret");
-  }
-
-  // Build location and industry filters
-  const locationFilter = location ? `in ${location}` : "in United States";
-  const industryFilter = industry ? `in ${industry} industry` : "";
-  const sizeFilter = companySize ? `with over ${companySize} employees` : "with over 50 employees";
-
-  // PHASE 1 - COMPANY DISCOVERY
-  console.log("🏢 PHASE 1 - COMPANY DISCOVERY: Finding companies...");
+  console.log("🔍 Starting SerpAPI lead generation...");
   
-  const companyQuery = `List 100 companies ${locationFilter} ${industryFilter} that have posted jobs for ${jobDescription} in the last 6 months ${sizeFilter}. Return in JSON with: company_name, industry, headquarters_location, careers_page_url, linkedin_company_url.`;
+  // Extract job title from description
+  const jobTitle = extractJobTitle(jobDescription);
+  console.log(`🔍 Extracted job title: "${jobTitle}"`);
+
+  // Build base search query
+  const locationPart = location ? `"${location}"` : "";
+  const industryPart = industry ? `"${industry}"` : "";
   
-  const messages = [
-    {
-      role: "user",
-      content: companyQuery
+  const baseQuery = `site:linkedin.com/in "${jobTitle}" "hiring manager" ${locationPart} ${industryPart}`.trim();
+  
+  let allLeads: Lead[] = [];
+  const queries = [baseQuery];
+
+  // If we need more results, add synonym queries
+  if (limit > 50) {
+    const synonyms = getJobTitleSynonyms(jobTitle);
+    for (const synonym of synonyms.slice(1, 4)) { // Add up to 3 synonyms
+      queries.push(`site:linkedin.com/in "${synonym}" "hiring manager" ${locationPart} ${industryPart}`.trim());
     }
-  ];
+  }
 
-  let allCompanies: Company[] = [];
-
-  try {
-    console.log(`🏢 Company discovery query: "${companyQuery}"`);
-    const perplexityData = await callPerplexityWithFallback(messages);
-    const rawText = perplexityData.choices?.[0]?.message?.content || "";
-    console.log(`🏢 PHASE 1 raw response: ${rawText.substring(0, 300)}...`);
-    
-    let companies = safeExtractJson(rawText);
-    
-    if (companies.length === 0) {
-      console.log(`🔍 DEBUG: Zero companies extracted`);
-      console.log(`🔍 DEBUG: Full raw response:`, rawText);
-      return [];
+  // Execute searches
+  for (const query of queries) {
+    try {
+      const results = await callSerpAPI(query);
+      console.log(`🔍 Got ${results.length} results for query: "${query}"`);
+      
+      const leads = results
+        .map(mapSerpResultToLead)
+        .filter((lead): lead is Lead => lead !== null);
+      
+      allLeads.push(...leads);
+      console.log(`🔍 Mapped to ${leads.length} valid leads`);
+      
+      // Stop if we have enough leads
+      if (allLeads.length >= limit * 2) { // Get extra for deduplication
+        break;
+      }
+    } catch (err) {
+      console.error(`Error processing query "${query}":`, err);
+      continue;
     }
-    
-    allCompanies = normalizeCompanies(companies);
-    console.log(`🏢 Found ${allCompanies.length} companies`);
-    
-  } catch (err) {
-    console.error(`Error in PHASE 1:`, err);
-    return [];
   }
 
-  if (allCompanies.length === 0) {
-    console.log("🏢 PHASE 1 produced no valid companies");
-    return [];
-  }
-
-  // Deduplicate companies
-  const uniqueCompanies = dedupeCompanies(allCompanies);
-  console.log(`🧹 Unique companies after deduplication: ${uniqueCompanies.length}`);
-
-  // Keep top 50-100 most relevant companies
-  const topCompanies = uniqueCompanies.slice(0, Math.min(100, uniqueCompanies.length));
-
-  // PHASE 2 - ENRICHMENT: Find leads for each company
-  const allLeads = await enrichCompaniesWithLeads(topCompanies);
-  
   if (allLeads.length === 0) {
-    console.log("🔍 PHASE 2 produced no leads");
+    console.log("🔍 No leads found from SerpAPI");
     return [];
   }
 
-  // Final cleanup and sorting
-  const uniqueLeads = dedupeLeads(allLeads);
+  // Deduplicate by LinkedIn URL
+  const uniqueLeads = deduplicateLeadsByUrl(allLeads);
+  console.log(`🔍 Unique leads after deduplication: ${uniqueLeads.length}`);
+
+  // Sort by relevance and limit
   const sortedLeads = uniqueLeads.sort((a, b) => b.relevance_score - a.relevance_score);
   const finalLeads = sortedLeads.slice(0, limit);
   
