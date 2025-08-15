@@ -1,21 +1,35 @@
-// Supabase Edge Function: generate-leads - SerpAPI Google Search
+// Supabase Edge Function: generate-leads - SerpAPI + Hunter.io
 // Deno runtime
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 interface Lead {
   name: string;
   title: string;
-  company_name: string;
+  company: string;
   email?: string;
-  linkedin_url: string;
-  location: string;
-  relevance_score: number;
+  confidence?: number;
+  source: string;
 }
 
 interface SerpApiResult {
   title: string;
   link: string;
   snippet: string;
+}
+
+interface HunterContact {
+  first_name: string;
+  last_name: string;
+  email: string;
+  position: string;
+  confidence: number;
+}
+
+interface HunterResponse {
+  data: {
+    emails: HunterContact[];
+    domain: string;
+  };
 }
 
 interface GenerateRequestBody {
@@ -28,6 +42,7 @@ interface GenerateRequestBody {
 }
 
 const SERPAPI_KEY = Deno.env.get("SERPAPI_KEY");
+const HUNTER_KEY = Deno.env.get("HUNTER_KEY");
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -70,38 +85,37 @@ function extractJobTitle(jobDescription: string): string {
   return 'Software Engineer'; // Default fallback
 }
 
-function getJobTitleSynonyms(jobTitle: string): string[] {
-  const synonymMap: { [key: string]: string[] } = {
-    'machine learning engineer': ['ML Engineer', 'AI Engineer', 'Data Engineer', 'AI/ML Engineer'],
-    'software engineer': ['Software Developer', 'Developer', 'Programmer', 'Software Dev'],
-    'data scientist': ['Data Analyst', 'Analytics Engineer', 'Data Engineer'],
-    'product manager': ['PM', 'Product Owner', 'Product Lead'],
-    'full stack developer': ['Fullstack Developer', 'Full-Stack Engineer', 'Web Developer'],
-    'devops engineer': ['DevOps', 'Site Reliability Engineer', 'SRE', 'Platform Engineer']
-  };
-  
-  const lowerTitle = jobTitle.toLowerCase();
-  for (const [key, synonyms] of Object.entries(synonymMap)) {
-    if (lowerTitle.includes(key)) {
-      return [jobTitle, ...synonyms];
+function extractDomainFromUrl(url: string): string | null {
+  try {
+    const domain = new URL(url).hostname.replace('www.', '');
+    // Filter out job boards and social media
+    const jobBoards = ['indeed.com', 'glassdoor.com', 'monster.com', 'linkedin.com', 'facebook.com', 'twitter.com'];
+    if (jobBoards.some(board => domain.includes(board))) {
+      return null;
     }
+    return domain;
+  } catch {
+    return null;
   }
-  
-  return [jobTitle];
 }
 
-async function callSerpAPI(query: string): Promise<SerpApiResult[]> {
+async function findCompanyDomains(jobTitle: string, location?: string, industry?: string): Promise<string[]> {
   if (!SERPAPI_KEY) {
     throw new Error("Missing SERPAPI_KEY secret");
   }
+
+  const locationPart = location ? ` "${location}"` : "";
+  const industryPart = industry ? ` "${industry}"` : "";
+  
+  const query = `"${jobTitle}" ("Careers" OR "Jobs" OR "We're Hiring") site:*.com -site:linkedin.com -site:facebook.com -site:twitter.com${locationPart}${industryPart}`;
+  
+  console.log(`🔍 SerpAPI company search query: "${query}"`);
 
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("q", query);
   url.searchParams.set("api_key", SERPAPI_KEY);
   url.searchParams.set("num", "100");
   url.searchParams.set("engine", "google");
-
-  console.log(`🔍 SerpAPI query: "${query}"`);
 
   try {
     const response = await fetch(url.toString());
@@ -113,68 +127,84 @@ async function callSerpAPI(query: string): Promise<SerpApiResult[]> {
     }
 
     const data = await response.json();
-    console.log(`🔍 SerpAPI response status: ${response.status}`);
-    console.log(`🔍 SerpAPI raw response: ${JSON.stringify(data).substring(0, 500)}...`);
+    console.log(`🔍 SerpAPI found ${data.organic_results?.length || 0} results`);
 
-    return data.organic_results || [];
+    const domains = new Set<string>();
+    
+    if (data.organic_results) {
+      for (const result of data.organic_results) {
+        const domain = extractDomainFromUrl(result.link);
+        if (domain) {
+          domains.add(domain);
+        }
+      }
+    }
+    
+    const uniqueDomains = Array.from(domains);
+    console.log(`🏢 Found ${uniqueDomains.length} unique company domains`);
+    
+    return uniqueDomains.slice(0, 50); // Limit to 50 companies for API rate limits
   } catch (err) {
     console.error(`Error calling SerpAPI:`, err);
     throw err;
   }
 }
 
-function mapSerpResultToLead(result: SerpApiResult): Lead | null {
-  if (!result.link || !result.link.includes('linkedin.com/in/')) {
-    return null;
+async function findContactsAtCompany(domain: string): Promise<Lead[]> {
+  if (!HUNTER_KEY) {
+    console.log("⚠️ Missing HUNTER_KEY, skipping Hunter.io enrichment");
+    return [];
   }
 
-  // Extract name from title (remove " - LinkedIn" or similar suffixes)
-  let name = result.title.replace(/ - LinkedIn.*$/i, '').replace(/ \| LinkedIn.*$/i, '').trim();
-  
-  // Extract potential title and company from snippet or title
-  let title = "Professional";
-  let company = "Company";
-  let location = "";
+  console.log(`👥 Searching contacts at ${domain}`);
 
-  // Try to extract from snippet
-  const snippet = result.snippet || "";
-  const titleMatches = snippet.match(/(?:at|@)\s+([^,.\n]+)/i);
-  if (titleMatches) {
-    company = titleMatches[1].trim();
-  }
+  const url = new URL("https://api.hunter.io/v2/domain-search");
+  url.searchParams.set("domain", domain);
+  url.searchParams.set("type", "personal");
+  url.searchParams.set("api_key", HUNTER_KEY);
+  url.searchParams.set("limit", "10");
 
-  const positionMatches = snippet.match(/^([^,.\n]+?)(?:\s+at\s+|\s+@\s+|,)/i);
-  if (positionMatches && !positionMatches[1].includes(name)) {
-    title = positionMatches[1].trim();
-  }
-
-  // Extract location if present
-  const locationMatches = snippet.match(/(?:in|from)\s+([^,.\n]+?)(?:\s*[,.]|$)/i);
-  if (locationMatches) {
-    location = locationMatches[1].trim();
-  }
-
-  return {
-    name,
-    title,
-    company_name: company,
-    linkedin_url: result.link,
-    location,
-    relevance_score: 85 // Default relevance score
-  };
-}
-
-function deduplicateLeadsByUrl(leads: Lead[]): Lead[] {
-  const seen = new Map<string, Lead>();
-  
-  for (const lead of leads) {
-    const existing = seen.get(lead.linkedin_url);
-    if (!existing || lead.relevance_score > existing.relevance_score) {
-      seen.set(lead.linkedin_url, lead);
+  try {
+    const response = await fetch(url.toString());
+    
+    if (!response.ok) {
+      console.error(`Hunter.io error for ${domain}: ${response.status}`);
+      return [];
     }
+
+    const data: HunterResponse = await response.json();
+    
+    if (!data.data?.emails) {
+      console.log(`No contacts found for ${domain}`);
+      return [];
+    }
+
+    const relevantRoles = [
+      "hiring manager", "recruiter", "hr manager", "talent acquisition", 
+      "engineering manager", "technical recruiter", "head of talent", 
+      "director of recruiting", "talent partner", "people operations"
+    ];
+
+    const contacts = data.data.emails
+      .filter(contact => {
+        const position = contact.position?.toLowerCase() || "";
+        return relevantRoles.some(role => position.includes(role));
+      })
+      .map(contact => ({
+        name: `${contact.first_name} ${contact.last_name}`,
+        title: contact.position || "Professional",
+        company: domain,
+        email: contact.email,
+        confidence: contact.confidence,
+        source: "Hunter.io"
+      }));
+
+    console.log(`👥 Found ${contacts.length} relevant contacts at ${domain}`);
+    return contacts;
+  } catch (err) {
+    console.error(`Error finding contacts for ${domain}:`, err);
+    return [];
   }
-  
-  return Array.from(seen.values());
 }
 
 async function generateLeads(
@@ -185,68 +215,55 @@ async function generateLeads(
   industry?: string,
   companySize?: string
 ): Promise<Lead[]> {
-  console.log("🔍 Starting SerpAPI lead generation...");
+  console.log("🚀 Starting lead generation with SerpAPI + Hunter.io...");
   
   // Extract job title from description
   const jobTitle = extractJobTitle(jobDescription);
-  console.log(`🔍 Extracted job title: "${jobTitle}"`);
+  console.log(`🎯 Extracted job title: "${jobTitle}"`);
 
-  // Build base search query
-  const locationPart = location ? `"${location}"` : "";
-  const industryPart = industry ? `"${industry}"` : "";
+  // Phase 1: Find companies that are hiring
+  const domains = await findCompanyDomains(jobTitle, location, industry);
   
-  const baseQuery = `site:linkedin.com/in "${jobTitle}" "hiring manager" ${locationPart} ${industryPart}`.trim();
-  
-  let allLeads: Lead[] = [];
-  const queries = [baseQuery];
-
-  // If we need more results, add synonym queries
-  if (limit > 50) {
-    const synonyms = getJobTitleSynonyms(jobTitle);
-    for (const synonym of synonyms.slice(1, 4)) { // Add up to 3 synonyms
-      queries.push(`site:linkedin.com/in "${synonym}" "hiring manager" ${locationPart} ${industryPart}`.trim());
-    }
+  if (domains.length === 0) {
+    console.log("⚠️ No companies found");
+    return [];
   }
 
-  // Execute searches
-  for (const query of queries) {
+  // Phase 2: Find contacts at each company
+  const allLeads: Lead[] = [];
+  let processedCompanies = 0;
+  
+  for (const domain of domains) {
+    if (allLeads.length >= limit) {
+      break;
+    }
+    
     try {
-      const results = await callSerpAPI(query);
-      console.log(`🔍 Got ${results.length} results for query: "${query}"`);
+      const contacts = await findContactsAtCompany(domain);
+      allLeads.push(...contacts);
+      processedCompanies++;
       
-      const leads = results
-        .map(mapSerpResultToLead)
-        .filter((lead): lead is Lead => lead !== null);
-      
-      allLeads.push(...leads);
-      console.log(`🔍 Mapped to ${leads.length} valid leads`);
-      
-      // Stop if we have enough leads
-      if (allLeads.length >= limit * 2) { // Get extra for deduplication
-        break;
+      // Add small delay to respect API rate limits
+      if (processedCompanies % 5 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     } catch (err) {
-      console.error(`Error processing query "${query}":`, err);
+      console.error(`Error processing ${domain}:`, err);
       continue;
     }
   }
 
-  if (allLeads.length === 0) {
-    console.log("🔍 No leads found from SerpAPI");
-    return [];
-  }
-
-  // Deduplicate by LinkedIn URL
-  const uniqueLeads = deduplicateLeadsByUrl(allLeads);
-  console.log(`🔍 Unique leads after deduplication: ${uniqueLeads.length}`);
-
-  // Sort by relevance and limit
-  const sortedLeads = uniqueLeads.sort((a, b) => b.relevance_score - a.relevance_score);
-  const finalLeads = sortedLeads.slice(0, limit);
+  console.log(`📊 Processed ${processedCompanies} companies, found ${allLeads.length} total leads`);
   
-  console.log(`📤 Final leads count: ${finalLeads.length}`);
-  return finalLeads;
+  // Sort by confidence and limit results
+  const sortedLeads = allLeads
+    .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+    .slice(0, limit);
+  
+  console.log(`📤 Returning ${sortedLeads.length} final leads`);
+  return sortedLeads;
 }
+
 
 
 serve(async (req) => {
@@ -279,10 +296,12 @@ serve(async (req) => {
     const formattedLeads = finalLeads.map(lead => ({
       name: lead.name,
       title: lead.title,
-      company: lead.company_name,
-      location: lead.location,
-      profile_url: lead.linkedin_url,
-      relevance_score: lead.relevance_score
+      company: lead.company,
+      email: lead.email,
+      confidence: lead.confidence,
+      source: lead.source,
+      profile_url: "", // No LinkedIn URLs in this workflow
+      relevance_score: lead.confidence || 0
     }));
 
     return new Response(JSON.stringify({ leads: formattedLeads }), {
