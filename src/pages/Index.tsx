@@ -26,6 +26,7 @@ const Index = () => {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [leadCount, setLeadCount] = useState("200");
 
   useEffect(() => {
     document.title = "Cresyx Lead Generator";
@@ -64,6 +65,7 @@ const Index = () => {
           jobDescription,
           location: location === "global" ? undefined : location,
           industry: industry === "all" ? undefined : industry,
+          leadCount: parseInt(leadCount),
         }),
       });
 
@@ -163,7 +165,7 @@ const Index = () => {
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-3 gap-4">
                     <div className="space-y-2">
                       <label className="text-sm font-medium">Location</label>
                       <Select value={location} onValueChange={setLocation}>
@@ -197,6 +199,20 @@ const Index = () => {
                         </SelectContent>
                       </Select>
                     </div>
+
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Lead Count</label>
+                      <Select value={leadCount} onValueChange={setLeadCount}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="200" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="50">50 leads</SelectItem>
+                          <SelectItem value="100">100 leads</SelectItem>
+                          <SelectItem value="200">200 leads</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
 
                   <Button type="submit" disabled={!canSubmit} className="w-full">
@@ -220,7 +236,7 @@ const Index = () => {
                   <div className="space-y-2">
                     <div className="flex justify-between text-sm">
                       <span>Progress</span>
-                      <span>{leads.length}/200 leads found</span>
+                      <span>{leads.length}/{leadCount} leads found</span>
                     </div>
                     <Progress value={progress} className="w-full" />
                   </div>

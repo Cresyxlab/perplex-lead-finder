@@ -33,9 +33,10 @@ interface HunterResponse {
 
 interface GenerateRequestBody {
   jobTitle: string;
-  jobDescription: string;
+  jobDescription: string;  
   location?: string;
   industry?: string;
+  leadCount?: number;
 }
 
 const SERPAPI_KEY = Deno.env.get("SERPAPI_KEY");
@@ -49,76 +50,61 @@ const CORS_HEADERS = {
 
 // ============== SERVICE 1: SEARCH SERVICE ==============
 class SearchService {
-  static async findCompanyDomains(
-    jobTitle: string,
-    location?: string,
-    industry?: string
-  ): Promise<string[]> {
-    if (!SERPAPI_KEY) {
-      throw new Error("Missing SERPAPI_KEY secret");
-    }
-
-    console.log(`🔍 SearchService: Finding companies hiring for "${jobTitle}"`);
-
-    const locationPart = location ? ` "${location}"` : "";
-    const industryPart = industry ? ` "${industry}"` : "";
-    
-    const query = `"${jobTitle}" ("Careers" OR "Jobs" OR "We're Hiring") site:*.com -site:linkedin.com -site:facebook.com -site:twitter.com -site:indeed.com -site:glassdoor.com -site:monster.com${locationPart}${industryPart}`;
-    
-    console.log(`🔍 SerpAPI query: "${query}"`);
-
-    const url = new URL("https://serpapi.com/search.json");
-    url.searchParams.set("q", query);
-    url.searchParams.set("api_key", SERPAPI_KEY);
-    url.searchParams.set("num", "100");
-    url.searchParams.set("engine", "google");
-
+  async findCompanyDomains(jobTitle: string, location?: string, industry?: string): Promise<string[]> {
     try {
-      const response = await fetch(url.toString());
+      // Relaxed query format
+      let query = `"${jobTitle}" ("Careers" OR "Jobs") site:*.com -site:linkedin.com`;
+      if (location && location !== 'global') query += ` location:${location}`;
+      if (industry && industry !== 'all') query += ` industry:${industry}`;
+
+      console.log(`🔍 SearchService: Querying SerpAPI with: ${query}`);
+      
+      const response = await fetch(`https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${SERPAPI_KEY}&num=50`);
       
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`SerpAPI error: ${response.status} - ${errorText}`);
-        throw new Error(`SerpAPI request failed: ${response.status}`);
+        throw new Error(`SerpAPI error: ${response.status}`);
       }
 
-      const data = await response.json();
-      console.log(`🔍 SerpAPI found ${data.organic_results?.length || 0} results`);
+      const data: SerpApiResult = await response.json();
+      const domains: string[] = [];
 
-      const domains = new Set<string>();
-      
+      // Extract domains from organic results
       if (data.organic_results) {
         for (const result of data.organic_results) {
           const domain = this.extractDomainFromUrl(result.link);
-          if (domain) {
-            domains.add(domain);
+          if (domain && !domains.includes(domain)) {
+            domains.push(domain);
           }
         }
       }
-      
-      const uniqueDomains = Array.from(domains);
-      console.log(`🏢 SearchService: Found ${uniqueDomains.length} unique company domains`);
-      
-      return uniqueDomains.slice(0, 50); // Limit for API rate limits
-    } catch (err) {
-      console.error(`SearchService error:`, err);
-      throw err;
+
+      console.log(`🔍 SearchService: Found ${domains.length} unique domains`);
+      return domains.slice(0, 50); // Limit to 50 domains
+    } catch (error) {
+      console.error('SearchService error:', error);
+      return [];
     }
   }
 
-  private static extractDomainFromUrl(url: string): string | null {
+  private extractDomainFromUrl(url: string): string | null {
     try {
-      const domain = new URL(url).hostname.replace('www.', '');
-      // Filter out job boards and social media
-      const jobBoards = [
-        'indeed.com', 'glassdoor.com', 'monster.com', 'linkedin.com', 
-        'facebook.com', 'twitter.com', 'ziprecruiter.com', 'dice.com',
-        'builtinnyc.com', 'builtinboston.com', 'wellfound.com', 'remoterocketship.com'
+      const urlObj = new URL(url);
+      const hostname = urlObj.hostname.toLowerCase();
+      
+      // Filter out common job boards and social media
+      const excludedDomains = [
+        'indeed.com', 'glassdoor.com', 'monster.com', 'ziprecruiter.com',
+        'careerbuilder.com', 'simplyhired.com', 'dice.com', 'craigslist.org',
+        'linkedin.com', 'facebook.com', 'twitter.com', 'youtube.com',
+        'builtin.com', 'builtinsf.com', 'welcometothejungle.com', 'roberthalf.com',
+        'governmentjobs.com', 'disneycareers.com', 'spacecrew.com'
       ];
-      if (jobBoards.some(board => domain.includes(board))) {
+      
+      if (excludedDomains.some(excluded => hostname.includes(excluded))) {
         return null;
       }
-      return domain;
+      
+      return hostname.replace('www.', '');
     } catch {
       return null;
     }
@@ -128,9 +114,9 @@ class SearchService {
 // ============== SERVICE 2: ENRICHMENT SERVICE ==============
 class EnrichmentService {
   private static readonly HIRING_ROLES = [
-    "hiring manager", "recruiter", "talent acquisition", "hr manager", 
-    "hr director", "engineering manager", "head of people", "vp talent", 
-    "technical recruiter"
+    'Hiring Manager', 'Recruiter', 'Talent Acquisition', 'HR Manager', 
+    'HR Director', 'Engineering Manager', 'People Operations', 'Talent Partner', 
+    'Technical Recruiter', 'People Lead'
   ];
 
   static async findContactsAtCompany(domain: string): Promise<Lead[]> {
@@ -162,26 +148,49 @@ class EnrichmentService {
         return [];
       }
 
-      const contacts = data.data.emails
-        .filter(contact => {
-          const position = contact.position?.toLowerCase() || "";
-          return this.HIRING_ROLES.some(role => position.includes(role));
-        })
-        .map(contact => ({
-          name: `${contact.first_name} ${contact.last_name}`,
-          title: contact.position || "Professional",
+      const leads: Lead[] = [];
+      const hiringContacts: Lead[] = [];
+      const generalContacts: Lead[] = [];
+
+      for (const contact of data.data.emails) {
+        const lead = {
+          name: `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || 'Unknown',
+          title: contact.position || 'Unknown Position',
           email: contact.email,
           confidence: contact.confidence,
           company: domain,
-          source: "Hunter.io"
-        }));
+          source: `Hunter.io`
+        };
 
-      console.log(`👥 EnrichmentService: Found ${contacts.length} relevant contacts at ${domain}`);
-      return contacts;
+        // Separate hiring contacts from general contacts
+        if (contact.position && this.isHiringRole(contact.position)) {
+          hiringContacts.push(lead);
+        } else if (contact.email) { // Only verified contacts
+          generalContacts.push({
+            ...lead,
+            title: `${contact.position || 'General Contact'} (General Contact)`
+          });
+        }
+      }
+
+      // Prefer hiring contacts, but if none found, return at least one general contact
+      if (hiringContacts.length > 0) {
+        leads.push(...hiringContacts);
+      } else if (generalContacts.length > 0) {
+        leads.push(generalContacts[0]); // Return the first general contact
+      }
+
+      console.log(`👥 EnrichmentService: Found ${hiringContacts.length} hiring contacts and ${generalContacts.length} general contacts at ${domain}`);
+      return leads;
     } catch (err) {
       console.error(`EnrichmentService error for ${domain}:`, err);
       return [];
     }
+  }
+
+  private static isHiringRole(position: string): boolean {
+    const normalizedPosition = position.toLowerCase();
+    return this.HIRING_ROLES.some(role => normalizedPosition.includes(role.toLowerCase()));
   }
 }
 
@@ -191,17 +200,18 @@ class AggregationService {
   private allLeads: Lead[] = [];
 
   async generateLeadsWithStreaming(
-    jobTitle: string,
-    jobDescription: string,
-    location?: string,
+    jobTitle: string, 
+    jobDescription: string, 
+    location?: string, 
     industry?: string,
+    leadCount: number = 200,
     onProgress?: (progress: number, lead?: Lead) => void
   ): Promise<Lead[]> {
     console.log("🚀 AggregationService: Starting lead generation...");
     
     // Phase 1: Find companies
     onProgress?.(10);
-    const domains = await SearchService.findCompanyDomains(jobTitle, location, industry);
+    const domains = await new SearchService().findCompanyDomains(jobTitle, location, industry);
     
     if (domains.length === 0) {
       throw new Error("No companies found. Try a broader job title or remove location filter.");
@@ -214,7 +224,7 @@ class AggregationService {
     let processedDomains = 0;
     
     for (const domain of domains) {
-      if (this.allLeads.length >= 200) {
+      if (this.allLeads.length >= leadCount) {
         break;
       }
 
@@ -223,7 +233,7 @@ class AggregationService {
         
         // Deduplicate by email
         for (const contact of contacts) {
-          if (!this.leads.has(contact.email) && this.allLeads.length < 200) {
+          if (!this.leads.has(contact.email) && this.allLeads.length < leadCount) {
             this.leads.add(contact.email);
             this.allLeads.push(contact);
             
@@ -254,7 +264,7 @@ class AggregationService {
     console.log(`📊 AggregationService: Completed with ${this.allLeads.length} leads from ${processedDomains} companies`);
     onProgress?.(100);
     
-    return this.allLeads.slice(0, 200);
+    return this.allLeads.slice(0, leadCount);
   }
 }
 
@@ -272,7 +282,7 @@ serve(async (req) => {
   }
 
   try {
-    const { jobTitle, jobDescription, location, industry }: GenerateRequestBody = await req.json();
+    const { jobTitle, jobDescription, location, industry, leadCount = 200 }: GenerateRequestBody = await req.json();
 
     if (!jobTitle || !jobDescription) {
       return new Response(JSON.stringify({ error: "jobTitle and jobDescription are required" }), {
@@ -299,6 +309,7 @@ serve(async (req) => {
             jobDescription,
             location,
             industry,
+            leadCount,
             (progress: number, lead?: Lead) => {
               if (lead) {
                 sendMessage('lead', { lead });
