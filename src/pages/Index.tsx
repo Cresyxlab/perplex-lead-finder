@@ -62,8 +62,8 @@ const Index = () => {
         body: JSON.stringify({
           jobTitle,
           jobDescription,
-          location: location || undefined,
-          industry: industry || undefined,
+          location: location === "global" ? undefined : location,
+          industry: industry === "all" ? undefined : industry,
         }),
       });
 
@@ -171,7 +171,7 @@ const Index = () => {
                           <SelectValue placeholder="Global" />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="">Global</SelectItem>
+                          <SelectItem value="global">Global</SelectItem>
                           <SelectItem value="US">United States</SelectItem>
                           <SelectItem value="EU">Europe</SelectItem>
                           <SelectItem value="Asia">Asia</SelectItem>
@@ -187,7 +187,7 @@ const Index = () => {
                           <SelectValue placeholder="All Industries" />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="">All Industries</SelectItem>
+                          <SelectItem value="all">All Industries</SelectItem>
                           <SelectItem value="Technology">Technology</SelectItem>
                           <SelectItem value="Finance">Finance</SelectItem>
                           <SelectItem value="Healthcare">Healthcare</SelectItem>
