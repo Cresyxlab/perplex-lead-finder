@@ -319,11 +319,17 @@ serve(async (req) => {
           );
 
           sendMessage('complete', { message: 'Lead generation completed' });
+          
+          // Send final done message to indicate stream completion
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         } catch (error) {
           console.error('Streaming error:', error);
           sendMessage('error', { 
             message: error instanceof Error ? error.message : 'An error occurred' 
           });
+          
+          // Send final done message even on error
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         } finally {
           controller.close();
         }

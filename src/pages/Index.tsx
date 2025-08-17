@@ -85,9 +85,15 @@ const Index = () => {
         const lines = chunk.split('\n');
 
         for (const line of lines) {
+          // Skip blank lines and [DONE] messages
+          if (!line.trim() || line.trim() === 'data: [DONE]') {
+            continue;
+          }
+
           if (line.startsWith('data: ')) {
             try {
-              const data = JSON.parse(line.slice(6));
+              const jsonData = line.slice(6);
+              const data = JSON.parse(jsonData);
               
               if (data.type === 'progress') {
                 setProgress(data.value);
@@ -95,12 +101,14 @@ const Index = () => {
                 setLeads(prev => [...prev, data.lead]);
               } else if (data.type === 'complete') {
                 setProgress(100);
-                break;
+                toast.success(`Lead generation completed! Found ${leads.length} leads.`);
+                return; // End the entire stream processing
               } else if (data.type === 'error') {
                 throw new Error(data.message);
               }
-            } catch (err) {
-              console.error('Error parsing SSE data:', err);
+            } catch (e) {
+              console.error('Failed to parse SSE data:', line, e);
+              // Continue processing other lines even if one fails
             }
           }
         }
