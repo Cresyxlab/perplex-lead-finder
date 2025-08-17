@@ -205,7 +205,7 @@ class AggregationService {
     location?: string, 
     industry?: string,
     leadCount: number = 200,
-    onProgress?: (progress: number, lead?: Lead) => void
+    onProgress?: (progress: number, lead?: Lead, domain?: string) => void
   ): Promise<Lead[]> {
     console.log("🚀 AggregationService: Starting lead generation...");
     
@@ -215,6 +215,11 @@ class AggregationService {
     
     if (domains.length === 0) {
       throw new Error("No companies found. Try a broader job title or remove location filter.");
+    }
+
+    // Stream each domain found
+    for (const domain of domains) {
+      onProgress?.(15, undefined, domain);
     }
 
     onProgress?.(20);
@@ -310,9 +315,12 @@ serve(async (req) => {
             location,
             industry,
             leadCount,
-            (progress: number, lead?: Lead) => {
+            (progress: number, lead?: Lead, domain?: string) => {
               if (lead) {
                 sendMessage('lead', { lead });
+              }
+              if (domain) {
+                sendMessage('domain', { domain });
               }
               sendMessage('progress', { value: progress });
             }

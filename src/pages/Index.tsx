@@ -25,6 +25,7 @@ const Index = () => {
   const [location, setLocation] = useState("");
   const [industry, setIndustry] = useState("");
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [domains, setDomains] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [leadCount, setLeadCount] = useState(200);
@@ -52,6 +53,7 @@ const Index = () => {
     
     setLoading(true);
     setLeads([]);
+    setDomains([]);
     setProgress(0);
     
     try {
@@ -99,6 +101,8 @@ const Index = () => {
                 setProgress(data.value);
               } else if (data.type === 'lead') {
                 setLeads(prev => [...prev, data.lead]);
+              } else if (data.type === 'domain') {
+                setDomains(prev => [...prev, data.domain]);
               } else if (data.type === 'complete') {
                 setProgress(100);
                 toast.success(`Lead generation completed! Found ${leads.length} leads.`);
@@ -264,6 +268,29 @@ const Index = () => {
                     <a href={csvHref} download={`cresyx-leads-${Date.now()}.csv`}>
                       <Button variant="outline">Export CSV</Button>
                     </a>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Discovered Companies */}
+            {domains.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Discovered Companies</CardTitle>
+                  <CardDescription>Company domains found from search</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="max-h-48 overflow-y-auto space-y-1">
+                    {domains.map((domain, idx) => (
+                      <div key={idx} className="flex items-center text-sm">
+                        <span className="text-muted-foreground mr-2">•</span>
+                        <span>{domain}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-2">
+                    {domains.length} companies found
                   </div>
                 </CardContent>
               </Card>
