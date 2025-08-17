@@ -113,11 +113,6 @@ class SearchService {
 
 // ============== SERVICE 2: ENRICHMENT SERVICE ==============
 class EnrichmentService {
-  private static readonly HIRING_ROLES = [
-    'Hiring Manager', 'Recruiter', 'Talent Acquisition', 'HR Manager', 
-    'HR Director', 'Engineering Manager', 'People Operations', 'Talent Partner', 
-    'Technical Recruiter', 'People Lead'
-  ];
 
   static async findContactsAtCompany(domain: string): Promise<Lead[]> {
     if (!HUNTER_KEY) {
@@ -149,48 +144,27 @@ class EnrichmentService {
       }
 
       const leads: Lead[] = [];
-      const hiringContacts: Lead[] = [];
-      const generalContacts: Lead[] = [];
 
       for (const contact of data.data.emails) {
-        const lead = {
-          name: `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || 'Unknown',
-          title: contact.position || 'Unknown Position',
-          email: contact.email,
-          confidence: contact.confidence,
-          company: domain,
-          source: `Hunter.io`
-        };
-
-        // Separate hiring contacts from general contacts
-        if (contact.position && this.isHiringRole(contact.position)) {
-          hiringContacts.push(lead);
-        } else if (contact.email) { // Only verified contacts
-          generalContacts.push({
-            ...lead,
-            title: `${contact.position || 'General Contact'} (General Contact)`
-          });
+        if (contact.email) { // Only verified contacts
+          const lead = {
+            name: `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || 'Unknown',
+            title: contact.position || 'Unknown Position',
+            email: contact.email,
+            confidence: contact.confidence,
+            company: domain,
+            source: `Hunter.io`
+          };
+          leads.push(lead);
         }
       }
 
-      // Prefer hiring contacts, but if none found, return at least one general contact
-      if (hiringContacts.length > 0) {
-        leads.push(...hiringContacts);
-      } else if (generalContacts.length > 0) {
-        leads.push(generalContacts[0]); // Return the first general contact
-      }
-
-      console.log(`👥 EnrichmentService: Found ${hiringContacts.length} hiring contacts and ${generalContacts.length} general contacts at ${domain}`);
+      console.log(`👥 EnrichmentService: Found ${leads.length} total contacts at ${domain}`);
       return leads;
     } catch (err) {
       console.error(`EnrichmentService error for ${domain}:`, err);
       return [];
     }
-  }
-
-  private static isHiringRole(position: string): boolean {
-    const normalizedPosition = position.toLowerCase();
-    return this.HIRING_ROLES.some(role => normalizedPosition.includes(role.toLowerCase()));
   }
 }
 
