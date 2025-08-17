@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
+import { Slider } from "@/components/ui/slider";
 import { toast } from "sonner";
 import { Copy, ExternalLink } from "lucide-react";
 
@@ -26,7 +27,7 @@ const Index = () => {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [leadCount, setLeadCount] = useState("200");
+  const [leadCount, setLeadCount] = useState(200);
 
   useEffect(() => {
     document.title = "Cresyx Lead Generator";
@@ -65,7 +66,7 @@ const Index = () => {
           jobDescription,
           location: location === "global" ? undefined : location,
           industry: industry === "all" ? undefined : industry,
-          leadCount: parseInt(leadCount),
+          leadCount: leadCount,
         }),
       });
 
@@ -200,18 +201,20 @@ const Index = () => {
                       </Select>
                     </div>
 
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">Lead Count</label>
-                      <Select value={leadCount} onValueChange={setLeadCount}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="200" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="50">50 leads</SelectItem>
-                          <SelectItem value="100">100 leads</SelectItem>
-                          <SelectItem value="200">200 leads</SelectItem>
-                        </SelectContent>
-                      </Select>
+                    <div className="space-y-3">
+                      <label className="text-sm font-medium">Leads to Generate: {leadCount}</label>
+                      <Slider
+                        value={[leadCount]}
+                        onValueChange={(value) => setLeadCount(value[0])}
+                        max={200}
+                        min={10}
+                        step={10}
+                        className="w-full"
+                      />
+                      <div className="flex justify-between text-xs text-muted-foreground">
+                        <span>10</span>
+                        <span>200</span>
+                      </div>
                     </div>
                   </div>
 

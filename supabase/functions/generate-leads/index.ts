@@ -52,8 +52,8 @@ const CORS_HEADERS = {
 class SearchService {
   async findCompanyDomains(jobTitle: string, location?: string, industry?: string): Promise<string[]> {
     try {
-      // Relaxed query format
-      let query = `"${jobTitle}" ("Careers" OR "Jobs") site:*.com -site:linkedin.com`;
+      // Enhanced query format
+      let query = `"${jobTitle}" ("Careers" OR "Jobs" OR "We're Hiring") -site:linkedin.com`;
       if (location && location !== 'global') query += ` location:${location}`;
       if (industry && industry !== 'all') query += ` industry:${industry}`;
 
@@ -79,7 +79,7 @@ class SearchService {
       }
 
       console.log(`🔍 SearchService: Found ${domains.length} unique domains`);
-      return domains.slice(0, 50); // Limit to 50 domains
+      return domains.slice(0, 80); // Limit to 80 domains
     } catch (error) {
       console.error('SearchService error:', error);
       return [];
